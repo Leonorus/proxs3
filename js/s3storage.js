@@ -29,7 +29,7 @@ Ext.define('PVE.storage.S3InputPanel', {
 	    {
 		xtype: 'pveContentTypeSelector',
 		name: 'content',
-		value: 'iso',
+		value: 'iso,vztmpl,snippets',
 		multiSelect: true,
 		fieldLabel: gettext('Content'),
 		allowBlank: false,

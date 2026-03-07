@@ -325,14 +325,69 @@ dpkg -i ../proxs3_*.deb
 
 ## Supported Content Types
 
-| Content Type | Proxmox Value | Description | Typical Use |
+| Content Type | Proxmox Value | S3 Prefix | Description |
 |---|---|---|---|
-| ISO images | `iso` | Installation media | Shared ISOs across all nodes |
-| Container templates | `vztmpl` | LXC container templates | Shared templates across all nodes |
-| Snippets | `snippets` | Cloud-init configs, hookscripts | Shared configuration snippets |
-| Backups | `backup` | VM/CT backup files | Offsite backup storage |
+| ISO images | `iso` | `template/iso/` | Installation media |
+| Container templates | `vztmpl` | `template/cache/` | LXC container templates |
+| Snippets | `snippets` | `snippets/` | Cloud-init configs, hookscripts |
+| Backups | `backup` | `dump/` | VM/CT backup files |
+| Import (disk images) | `import` | `images/` | Golden images for VM templates |
 
-Note: ProxS3 does **not** support VM disk images (`images`) or container rootdirs (`rootdir`). It is designed for file-based content types, not block storage.
+Note: ProxS3 does **not** support running VM disk images (`images`) or container rootdirs (`rootdir`) directly from S3. Live VM disks require block-level random access which S3 cannot provide. Use the `import` content type to store golden images that can be copied to local storage to create templates.
+
+## Use Cases
+
+### Shared ISO Library
+
+Store installation media in S3 and make it available across all nodes in your cluster. Upload once, use everywhere — no need to copy ISOs between nodes or maintain a shared NFS mount just for a few files.
+
+```bash
+# Upload ISOs to your bucket
+aws s3 cp debian-12.7-amd64-netinst.iso s3://my-bucket/template/iso/
+aws s3 cp ubuntu-24.04-live-server-amd64.iso s3://my-bucket/template/iso/
+
+# They appear in the Proxmox UI on every node immediately
+```
+
+When a node needs an ISO (e.g., to boot a VM installer), ProxS3 downloads it to the local cache on first use. Subsequent uses on the same node are served from cache with an ETag check to ensure freshness. Update an ISO in S3 and every node picks up the new version automatically.
+
+### Golden Images for VM Templates
+
+Store base VM disk images in S3 and import them on any node to create templates. This is ideal for maintaining a library of pre-built images (e.g., a hardened Debian base, a pre-configured application stack) that can be deployed across clusters.
+
+```bash
+# Upload golden images to the images/ prefix
+aws s3 cp base-debian12-disk-0.raw s3://my-bucket/images/
+aws s3 cp base-ubuntu2404-disk-0.qcow2 s3://my-bucket/images/
+```
+
+Enable the `import` content type on your S3 storage, then use Proxmox's import functionality to copy disk images to local storage and convert them into templates. The originals stay in S3 as your single source of truth.
+
+### Shared Container Templates
+
+Maintain a central library of LXC container templates across your cluster. Particularly useful for custom templates that aren't available from the standard Proxmox repositories.
+
+```bash
+# Upload custom container templates
+aws s3 cp my-custom-debian-12_1.0_amd64.tar.zst s3://my-bucket/template/cache/
+```
+
+Templates appear in the Proxmox UI under the S3 storage. When you create a container, ProxS3 downloads the template to the local cache. Like ISOs, templates are validated against S3 on each access — update a template in the bucket and nodes will pick up the change.
+
+### Cloud-Init Snippets
+
+Store cloud-init user-data, network-config, and vendor-data files in S3 for use across the cluster. Keep your infrastructure-as-code configs in one place.
+
+```bash
+aws s3 cp cloud-init-user.yaml s3://my-bucket/snippets/
+aws s3 cp network-config.yaml s3://my-bucket/snippets/
+```
+
+### Offsite Backups
+
+Use S3 as a backup target for vzdump. Backups are uploaded directly to S3 and can be restored on any node. Combined with S3 lifecycle policies, this gives you cost-effective long-term backup retention without managing local disk space.
+
+**Note:** Backup to S3 requires sufficient local cache space to stage the backup file before upload, and restore requires downloading the full backup before extraction.
 
 ## License
 
