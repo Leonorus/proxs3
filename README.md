@@ -52,8 +52,17 @@ dpkg -i proxs3_0.1.0-1_amd64.deb
 This installs:
 - `/usr/bin/proxs3d` — the Go daemon
 - `/usr/share/perl5/PVE/Storage/Custom/S3Plugin.pm` — the Proxmox plugin
+- `/usr/share/pve-manager/js/s3storage.js` — web UI panel for the S3 storage type
 - `/lib/systemd/system/proxs3d.service` — systemd unit
 - `/etc/proxs3/proxs3d.json` — daemon config (only created if not already present)
+
+**Important:** After installing or upgrading the package, you must restart the PVE services so they load the new plugin code:
+
+```bash
+systemctl restart pvedaemon pveproxy pvestatd
+```
+
+These services load the storage plugin at startup. Without a restart, the S3 storage type won't appear in the UI, storage status will show as "unknown", and content type changes won't take effect. The `proxs3d` daemon is managed separately and is restarted automatically by the package.
 
 ### Step 2: Configure the daemon
 
@@ -267,6 +276,16 @@ systemctl status proxs3d
 The daemon performs health checks against each configured S3 endpoint every 30 seconds. If an endpoint becomes unreachable, the storage is marked as offline in Proxmox. When connectivity is restored, it's automatically marked as online again.
 
 ## Troubleshooting
+
+### S3 doesn't appear in the "Add Storage" dropdown / storage shows grey question mark
+
+The PVE services (`pvedaemon`, `pveproxy`, `pvestatd`) load storage plugins at startup. If you installed or upgraded ProxS3 without restarting them, they won't know about the S3 type:
+
+```bash
+systemctl restart pvedaemon pveproxy pvestatd
+```
+
+Then hard-refresh your browser (Ctrl+Shift+R). This is the most common issue after install or upgrade.
 
 ### Storage shows as "unavailable" in the UI
 
