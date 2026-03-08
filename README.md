@@ -66,10 +66,10 @@ On **each Proxmox node** in your cluster:
 
 ```bash
 # Download the .deb from the latest release
-wget https://github.com/sol1/proxs3/releases/latest/download/proxs3_0.2.0-1_amd64.deb
+wget https://github.com/sol1/proxs3/releases/latest/download/proxs3_0.2.1-1_amd64.deb
 
 # Install
-dpkg -i proxs3_0.2.0-1_amd64.deb
+dpkg -i proxs3_0.2.1-1_amd64.deb
 ```
 
 This installs:

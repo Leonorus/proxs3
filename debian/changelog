@@ -1,3 +1,15 @@
+proxs3 (0.2.1-1) unstable; urgency=medium
+
+  * Fix cache_dir config being ignored - plugin now queries daemon for
+    the actual cache path instead of hardcoding /var/cache/proxs3 (#1)
+  * Remove CacheDirectory= from systemd unit (was breaking symlinks)
+  * Fix build on Debian 12 Bookworm build environments (#2)
+  * Require PVE 9+ at runtime (plugin API targets PVE 9)
+  * Add /v1/config API endpoint
+  * Comprehensive test suite (95 tests) with S3 client mock interface
+
+ -- Dave Kempe <dave@sol1.com.au>  Sun, 09 Mar 2026 10:00:00 +0000
+
 proxs3 (0.2.0-1) unstable; urgency=medium
 
   * Multipart upload support for files >5GB (AWS SDK upload manager)
