@@ -52,7 +52,7 @@ When connectivity returns, the health check detects it within 30 seconds and the
 
 ## Requirements
 
-- Proxmox VE 8.x or 9.x (Debian Bookworm or Trixie)
+- Proxmox VE 9.x (Debian Trixie)
 - An S3-compatible object store (AWS S3, MinIO, Ceph RGW, Cloudflare R2, Wasabi, etc.)
 - Network access from each Proxmox node to the S3 endpoint (direct or via HTTP proxy)
 
@@ -65,11 +65,11 @@ This gets you from zero to a working S3-backed ISO/template store in under 5 min
 On **each Proxmox node** in your cluster:
 
 ```bash
-# Download the .deb from the latest release
-wget https://github.com/sol1/proxs3/releases/latest/download/proxs3_0.2.1-1_amd64.deb
+# Download the latest release
+wget https://github.com/sol1/proxs3/releases/latest/download/proxs3_amd64.deb
 
 # Install
-dpkg -i proxs3_0.2.1-1_amd64.deb
+dpkg -i proxs3_amd64.deb
 ```
 
 This installs:
