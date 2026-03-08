@@ -4,28 +4,28 @@ Native S3 storage plugin for Proxmox VE. Use any S3-compatible object store as a
 
 ## Why Not s3fs / rclone mount?
 
-FUSE-based S3 mounts (s3fs, rclone, goofys) pretend to be local filesystems. This works until it doesn't:
+FUSE-based S3 mounts (s3fs, rclone, goofys) present S3 as a local filesystem. This causes problems in a PVE cluster:
 
-- **Network outage kills the cluster.** When the proxy or internet goes down, the FUSE mount hangs or disappears. PVE's storage polling (pvestatd) tries to stat the mountpoint, blocks, backs up, and the whole cluster suffers. Other storages get affected because the polling loop is stuck.
-- **No graceful degradation.** A hung FUSE mount can't return "offline" — it just blocks until the kernel times out. PVE has no way to know the storage is unreachable vs just slow.
-- **Phantom filesystem.** PVE thinks it's talking to a local directory, so it has no concept of the storage being "online" or "offline". There's no health check, no status indicator, no way to distinguish "the file doesn't exist" from "the network is down".
-- **Cache coherency problems.** FUSE caches are opaque to PVE. Stale data, partial reads, and silent corruption are common under load or network instability.
+- **Network outages block the cluster.** When the proxy or internet goes down, the FUSE mount hangs or disappears. pvestatd tries to stat the mountpoint, blocks, and the polling loop backs up. This affects all storages on the node, not just the S3 one.
+- **No offline status.** A hung FUSE mount can't report itself as offline. It blocks until the kernel times out. PVE cannot distinguish "unreachable" from "slow".
+- **PVE doesn't know it's remote.** PVE treats the mount as a local directory. There is no health check, no online/offline state, and no way to tell a missing file from a network error.
+- **Cache coherency.** FUSE caches are opaque to PVE. Stale reads and partial data can occur under load or network instability.
 
-ProxS3 takes a different approach: it's a **native Proxmox storage plugin** that understands it's talking to a remote object store. S3 operations happen in a separate Go daemon, never in PVE's critical path. The local cache is a real filesystem directory that always exists. When S3 is unreachable, PVE sees `online: false` instantly — no blocking, no hung mounts, no cascading failures.
+ProxS3 is a native Proxmox storage plugin. S3 operations run in a separate Go daemon, not in PVE's polling path. The local cache is a real directory on disk that always exists. When S3 is unreachable, PVE gets `online: false` from cached state within the normal polling interval. Other storages are unaffected.
 
 ## How It Works
 
 ProxS3 has two components:
 
-- **proxs3d** — a Go daemon that handles all S3 operations, maintains a local file cache, and monitors connectivity. It listens on a Unix socket.
-- **S3Plugin.pm** — a Perl storage plugin that registers a native `s3` storage type in Proxmox. All storage operations are forwarded to the daemon.
+- **proxs3d** - Go daemon that handles S3 operations, maintains a local file cache, and monitors endpoint connectivity. Listens on a Unix socket.
+- **S3Plugin.pm** - Perl storage plugin that registers the `s3` storage type in Proxmox. Forwards all storage operations to the daemon via the Unix socket.
 
 ```
 Proxmox UI / pvesm CLI
        |
        v
   S3Plugin.pm  (PVE::Storage::Custom)
-       | Unix socket (always local, never blocks on network)
+       | Unix socket (local only)
        v
     proxs3d    (Go daemon)
        | HTTPS              | local disk
@@ -40,15 +40,15 @@ The daemon auto-discovers S3 storages from `/etc/pve/storage.cfg`. When you add,
 
 When the S3 endpoint becomes unreachable (proxy down, internet outage, provider issue):
 
-| PVE Operation | What Happens | Impact |
+| PVE Operation | Behaviour | Effect |
 |---|---|---|
-| Status polling (pvestatd) | Returns `online: false` from cached state | **No blocking.** Storage shows as unavailable immediately. Other storages unaffected. |
-| List volumes | 10s timeout, returns empty list | **Brief delay then graceful.** UI shows no contents but doesn't hang. |
-| Access a cached file | Serves local cached copy (skips S3 validation) | **Works offline.** Running VMs keep working with cached ISOs/templates. |
-| Access an uncached file | Returns error | **Expected.** Can't download what we don't have. |
-| Upload | File saved to local cache, S3 upload fails and is logged | **No data loss.** File is preserved locally. |
+| Status polling (pvestatd) | Returns `online: false` from cached state | Storage shown as unavailable. No network call, no blocking. |
+| List volumes | 10s timeout, returns empty list | UI shows no contents. Does not hang. |
+| Access a cached file | Serves local cached copy, skips S3 validation | Running VMs continue to work with cached ISOs/templates. |
+| Access an uncached file | Returns error | File is not available without S3 connectivity. |
+| Upload | File written to local cache, S3 upload fails (logged) | File preserved locally, not yet synced to S3. |
 
-When connectivity returns, the health check picks it up within 30 seconds and the storage goes green again. No manual intervention needed.
+When connectivity returns, the health check detects it within 30 seconds and the storage status returns to online.
 
 ## Requirements
 
@@ -73,11 +73,11 @@ dpkg -i proxs3_0.1.2-1_amd64.deb
 ```
 
 This installs:
-- `/usr/bin/proxs3d` — the Go daemon
-- `/usr/share/perl5/PVE/Storage/Custom/S3Plugin.pm` — the Proxmox plugin
-- `/usr/share/pve-manager/js/s3storage.js` — web UI panel for the S3 storage type
-- `/lib/systemd/system/proxs3d.service` — systemd unit
-- `/etc/proxs3/proxs3d.json` — daemon config (only created if not already present)
+- `/usr/bin/proxs3d` - the Go daemon
+- `/usr/share/perl5/PVE/Storage/Custom/S3Plugin.pm` - the Proxmox plugin
+- `/usr/share/pve-manager/js/s3storage.js` - web UI panel for the S3 storage type
+- `/lib/systemd/system/proxs3d.service` - systemd unit
+- `/etc/proxs3/proxs3d.json` - daemon config (only created if not already present)
 
 **Important:** After installing or upgrading the package, you must restart the PVE services so they load the new plugin code:
 
@@ -159,7 +159,7 @@ Go to **Datacenter -> Storage -> Add -> S3** and fill in the fields.
 **Option B: Via the command line**
 
 ```bash
-# AWS S3 example — note: endpoint is just the hostname, no https://
+# AWS S3 example - endpoint is just the hostname, no https://
 pvesm add s3 my-s3-store \
     --endpoint s3.us-east-1.amazonaws.com \
     --bucket my-proxmox-bucket \
@@ -179,7 +179,7 @@ pvesm add s3 my-do-store \
     --content iso,vztmpl,snippets \
     --use-ssl 1
 
-# MinIO example — note: path-style 1 required
+# MinIO example - path-style 1 required
 pvesm add s3 my-minio-store \
     --endpoint minio.local:9000 \
     --bucket my-bucket \
@@ -190,7 +190,7 @@ pvesm add s3 my-minio-store \
 **What happens behind the scenes:**
 
 1. The plugin writes your credentials to `/etc/pve/priv/proxs3/my-s3-store.json` (root-only, 0600). This file is cluster-shared via pmxcfs.
-2. The storage configuration (endpoint, bucket, region, etc.) is written to `/etc/pve/storage.cfg` — but **credentials are not stored there**.
+2. The storage configuration (endpoint, bucket, region, etc.) is written to `/etc/pve/storage.cfg`, but **credentials are not stored there**.
 3. The plugin signals proxs3d to reload its configuration.
 4. The daemon re-reads `storage.cfg`, discovers the new S3 storage, loads its credentials, and starts health-checking the endpoint.
 
@@ -203,7 +203,7 @@ pvesm status
 # List contents
 pvesm list my-s3-store
 
-# Or check the web UI — your S3 storage should appear with a green status indicator
+# Or check the web UI - your S3 storage should appear with a green status indicator
 ```
 
 You should now see any ISOs or templates you uploaded to the bucket. You can upload new ones via the Proxmox UI or download ISOs directly from the storage view.
@@ -228,19 +228,19 @@ You should now see any ISOs or templates you uploaded to the bucket. You can upl
 
 | Field | Required | Description |
 |---|---|---|
-| `endpoint` | Yes | S3 endpoint hostname — see **Endpoint and URL Style** below |
+| `endpoint` | Yes | S3 endpoint hostname (see **Endpoint and URL Style** below) |
 | `bucket` | Yes | S3 bucket name |
 | `region` | No | S3 region (defaults to `us-east-1`) |
 | `access-key` | No | S3 access key ID (omit for public buckets) |
 | `secret-key` | No | S3 secret access key (omit for public buckets) |
 | `content` | No | Comma-separated content types: `iso`, `vztmpl`, `snippets`, `backup`, `import` |
 | `use-ssl` | No | Use HTTPS (`1`) or HTTP (`0`). Defaults to on. |
-| `path-style` | No | URL style — see **Endpoint and URL Style** below |
+| `path-style` | No | URL style (see **Endpoint and URL Style** below) |
 | `nodes` | No | Restrict storage to specific cluster nodes |
 
 ### Endpoint and URL Style
 
-The **endpoint** field must be the **base hostname only** — no `https://` prefix, no bucket name, no trailing slash.
+The **endpoint** field must be the **base hostname only**: no `https://` prefix, no bucket name, no trailing slash.
 
 S3 has two URL styles for addressing buckets:
 
@@ -249,7 +249,7 @@ S3 has two URL styles for addressing buckets:
 | **Virtual-hosted** (default) | `https://BUCKET.ENDPOINT/key` | `0` | `https://my-bucket.s3.amazonaws.com/template/iso/debian.iso` |
 | **Path** | `https://ENDPOINT/BUCKET/key` | `1` | `https://minio.local:9000/my-bucket/template/iso/debian.iso` |
 
-**Common mistake:** If your provider gives you a URL like `https://my-bucket.syd1.digitaloceanspaces.com`, the endpoint is just `syd1.digitaloceanspaces.com` — the bucket name is already a separate field. Don't include it in the endpoint or it will be doubled.
+**Common mistake:** If your provider gives you a URL like `https://my-bucket.syd1.digitaloceanspaces.com`, the endpoint is just `syd1.digitaloceanspaces.com`. The bucket name is a separate field. Don't include it in the endpoint or it will be doubled.
 
 **How to choose:**
 - **AWS S3, DigitalOcean Spaces, Wasabi, Cloudflare R2, Backblaze B2** → Virtual-hosted (`path-style 0`, the default)
@@ -310,11 +310,11 @@ The cache is critical to how ProxS3 works. Without it, every file access would r
 
 ProxS3 is designed for Proxmox clusters where you want every node to have access to the same ISOs and templates:
 
-- **Add the storage once** — `storage.cfg` is shared across all nodes via pmxcfs. After `pvesm add`, every node sees the storage.
-- **Credentials are cluster-shared** — stored in `/etc/pve/priv/proxs3/`, which is also distributed by pmxcfs. Root-only permissions (0600).
-- **Install the .deb on each node** — the daemon and plugin must be present on every node that needs access.
-- **Cache is per-node** — each node maintains its own local cache. This is intentional: nodes pull from S3 independently and validate their cache against S3 metadata.
-- **Daemon config is per-node** — `/etc/proxs3/proxs3d.json` is local to each node. This lets you set different cache paths and sizes based on each node's local disk layout.
+- **Add the storage once.** `storage.cfg` is shared across all nodes via pmxcfs. After `pvesm add`, every node sees the storage.
+- **Credentials are cluster-shared.** Stored in `/etc/pve/priv/proxs3/`, distributed by pmxcfs. Root-only permissions (0600).
+- **Install the .deb on each node.** The daemon and plugin must be present on every node that needs access.
+- **Cache is per-node.** Each node maintains its own local cache. Nodes pull from S3 independently and validate against S3 metadata.
+- **Daemon config is per-node.** `/etc/proxs3/proxs3d.json` is local to each node, so you can set different cache paths and sizes per node.
 
 ## Daemon Management
 
@@ -418,7 +418,7 @@ Note: ProxS3 does **not** support running VM disk images (`images`) or container
 
 ### Shared ISO Library
 
-Store installation media in S3 and make it available across all nodes in your cluster. Upload once, use everywhere — no need to copy ISOs between nodes or maintain a shared NFS mount just for a few files.
+Store installation media in S3 and make it available across all nodes in your cluster. Upload once, available on every node. No need to copy ISOs between nodes or maintain a shared NFS mount.
 
 ```bash
 # Upload ISOs to your bucket
@@ -451,7 +451,7 @@ Maintain a central library of LXC container templates across your cluster. Parti
 aws s3 cp my-custom-debian-12_1.0_amd64.tar.zst s3://my-bucket/template/cache/
 ```
 
-Templates appear in the Proxmox UI under the S3 storage. When you create a container, ProxS3 downloads the template to the local cache. Like ISOs, templates are validated against S3 on each access — update a template in the bucket and nodes will pick up the change.
+Templates appear in the Proxmox UI under the S3 storage. When you create a container, ProxS3 downloads the template to the local cache. Like ISOs, templates are validated against S3 on each access. Update a template in the bucket and nodes pick up the change automatically.
 
 ### Cloud-Init Snippets
 
