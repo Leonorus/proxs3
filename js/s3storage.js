@@ -72,6 +72,15 @@ Ext.define('PVE.storage.S3InputPanel', {
 		value: '0',
 		allowBlank: false,
 	    },
+	    {
+		xtype: 'proxmoxintegerfield',
+		name: 'cache-max-age',
+		fieldLabel: 'Cache Max Age',
+		emptyText: '0 (keep forever)',
+		minValue: 0,
+		allowBlank: true,
+		deleteEmpty: !me.isCreate,
+	    },
 	];
 
 	me.callParent();

@@ -66,10 +66,10 @@ On **each Proxmox node** in your cluster:
 
 ```bash
 # Download the .deb from the latest release
-wget https://github.com/sol1/proxs3/releases/latest/download/proxs3_0.1.2-1_amd64.deb
+wget https://github.com/sol1/proxs3/releases/latest/download/proxs3_0.2.0-1_amd64.deb
 
 # Install
-dpkg -i proxs3_0.1.2-1_amd64.deb
+dpkg -i proxs3_0.2.0-1_amd64.deb
 ```
 
 This installs:
@@ -236,6 +236,7 @@ You should now see any ISOs or templates you uploaded to the bucket. You can upl
 | `content` | No | Comma-separated content types: `iso`, `vztmpl`, `snippets`, `backup`, `import` |
 | `use-ssl` | No | Use HTTPS (`1`) or HTTP (`0`). Defaults to on. |
 | `path-style` | No | URL style (see **Endpoint and URL Style** below) |
+| `cache-max-age` | No | Maximum age of cached files in days. `0` (default) keeps files forever. See **Cache Age Eviction** below. |
 | `nodes` | No | Restrict storage to specific cluster nodes |
 
 ### Endpoint and URL Style
@@ -305,6 +306,24 @@ The cache is critical to how ProxS3 works. Without it, every file access would r
 **Cache eviction:** When the total cache size exceeds `cache_max_mb`, the oldest files (by modification time) are automatically evicted to make room. This runs asynchronously after each new file is cached.
 
 **Upload caching:** When you upload a file via the Proxmox UI, it's sent to S3 and simultaneously cached locally. This means the file is available for immediate use without waiting for a download.
+
+### Cache Age Eviction
+
+The `cache-max-age` storage property controls how long files stay in the local cache. This is a **per-storage** setting, configured in Proxmox (not in the daemon config), so different storages can have different policies.
+
+**Why per-storage?** A single daemon often serves multiple storages - for example, one for ISOs and one for backups. You probably want ISOs cached indefinitely (they're accessed repeatedly) but backup files cleaned up after a few days (they're written once, synced to S3, and rarely accessed locally again).
+
+```bash
+# Keep backup cache for 7 days
+pvesm set my-backup-store --cache-max-age 7
+
+# Keep ISOs forever (default, no need to set)
+pvesm set my-iso-store --cache-max-age 0
+```
+
+The daemon checks file ages hourly. Files older than `cache-max-age` days (by modification time) are removed from the local cache. The files remain in S3 and will be re-downloaded if needed.
+
+This is separate from `cache_max_mb` (the daemon-wide size limit) and from `prune-backups` (which controls backup retention in S3 itself, not the local cache).
 
 ## Multi-Node Clusters
 
