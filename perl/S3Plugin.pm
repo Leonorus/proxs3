@@ -290,8 +290,12 @@ sub activate_storage {
     };
 
     # Ensure the cache path exists for PVE's upload flow
+    # Untaint storeid and cache_base — PVE validates these before they reach us,
+    # but File::Path::make_path enforces taint checks unlike basic mkdir/open.
     my $cache_base = $_cache_dir // $DEFAULT_CACHE_DIR;
-    my $path = "$cache_base/$storeid";
+    ($cache_base) = $cache_base =~ /\A([a-zA-Z0-9._\/-]+)\z/ or die "Invalid cache dir: $cache_base\n";
+    (my $safe_sid) = $storeid =~ /\A([a-zA-Z0-9._-]+)\z/ or die "Invalid storage id: $storeid\n";
+    my $path = "$cache_base/$safe_sid";
     for my $sub (qw(template/iso template/cache snippets dump images)) {
         my $dir = "$path/$sub";
         File::Path::make_path($dir) if ! -d $dir;
