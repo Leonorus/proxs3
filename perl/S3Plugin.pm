@@ -436,6 +436,20 @@ sub free_image {
 
 # --- Helpers ---
 
+# PVE API: parse_volname returns ($vtype, $name, $vmid, $basename, $basevmid, $isBase, $format).
+# We override the base class to handle our simple content/filename format and untaint the
+# values — the base class parse_volname returns tainted strings extracted from $volname,
+# which propagate through filesystem_path() into exec() and trigger taint-mode errors.
+sub parse_volname {
+    my ($class, $volname) = @_;
+    my ($content, $filename) = _parse_volname($volname);
+    # Untaint via regex — these values are validated by PVE before reaching us
+    ($content) = $content =~ /\A([a-zA-Z0-9_-]+)\z/ or die "Invalid content type: $content\n";
+    ($filename) = $filename =~ /\A([a-zA-Z0-9._\/-]+)\z/ or die "Invalid filename: $filename\n";
+    my $format = $filename =~ /\.(raw|qcow2|vmdk)$/i ? lc($1) : 'raw';
+    return ($content, $filename, undef, undef, undef, undef, $format);
+}
+
 sub _parse_volname {
     my ($volname) = @_;
     my $content = 'iso';

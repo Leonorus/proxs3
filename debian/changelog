@@ -1,3 +1,9 @@
+proxs3 (0.3.3-1) unstable; urgency=medium
+
+  * Override parse_volname to untaint all path components for PVE taint mode
+
+ -- Dave Kempe <dave@sol1.com.au>  Sat, 21 Mar 2026 09:11:00 +1100
+
 proxs3 (0.3.2-1) unstable; urgency=medium
 
   * Fix taint-mode error in check_config for qemu-img import path
