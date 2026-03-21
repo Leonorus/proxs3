@@ -301,8 +301,15 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(obj.Key, "/") {
 			continue
 		}
+		// images volids use "vmid/diskname" format; others use "content/filename"
+		var volname string
+		if content == "images" {
+			volname = strings.TrimPrefix(obj.Key, prefix)
+		} else {
+			volname = content + "/" + filepath.Base(obj.Key)
+		}
 		vol := VolumeInfo{
-			Volume:  fmt.Sprintf("%s:%s/%s", storageID, content, filepath.Base(obj.Key)),
+			Volume:  fmt.Sprintf("%s:%s", storageID, volname),
 			Key:     obj.Key,
 			Size:    obj.Size,
 			Format:  detectFormat(obj.Key),
@@ -450,6 +457,8 @@ func contentToPrefix(content string) string {
 		return "dump/"
 	case "import":
 		return "import/"
+	case "images":
+		return "images/"
 	default:
 		return content + "/"
 	}

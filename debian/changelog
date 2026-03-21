@@ -1,3 +1,11 @@
+proxs3 (0.4.0-1) unstable; urgency=medium
+
+  * Add images content type support for VM disk templates
+  * Handle vmid/diskname volname format for images content
+  * Add images prefix mapping to daemon, watcher, and cache directory creation
+
+ -- Dave Kempe <dave@sol1.com.au>  Sat, 21 Mar 2026 11:50:00 +1100
+
 proxs3 (0.3.3-1) unstable; urgency=medium
 
   * Override parse_volname to untaint all path components for PVE taint mode

@@ -33,7 +33,7 @@ sub type {
 sub plugindata {
     return {
         content => [
-            { images => 0, rootdir => 0, vztmpl => 1, iso => 1, backup => 1, snippets => 1, none => 0, import => 1 },
+            { images => 1, rootdir => 0, vztmpl => 1, iso => 1, backup => 1, snippets => 1, none => 0, import => 1 },
             { iso => 1, vztmpl => 1, snippets => 1 },
         ],
         format => [ { raw => 1 } , 'raw' ],
@@ -300,7 +300,7 @@ sub activate_storage {
     ($cache_base) = $cache_base =~ /\A([a-zA-Z0-9._\/-]+)\z/ or die "Invalid cache dir: $cache_base\n";
     (my $safe_sid) = $storeid =~ /\A([a-zA-Z0-9._-]+)\z/ or die "Invalid storage id: $storeid\n";
     my $path = "$cache_base/$safe_sid";
-    for my $sub (qw(template/iso template/cache snippets dump import)) {
+    for my $sub (qw(template/iso template/cache snippets dump import images)) {
         my $dir = "$path/$sub";
         File::Path::make_path($dir) if ! -d $dir;
     }
@@ -413,7 +413,7 @@ sub activate_volume {
 }
 
 sub clone_image {
-    die "clone not supported on S3 storage\n";
+    die "clone not supported on S3 storage — use --target to clone to local storage\n";
 }
 
 sub alloc_image {
@@ -447,14 +447,24 @@ sub parse_volname {
     ($content) = $content =~ /\A([a-zA-Z0-9_-]+)\z/ or die "Invalid content type: $content\n";
     ($filename) = $filename =~ /\A([a-zA-Z0-9._\/-]+)\z/ or die "Invalid filename: $filename\n";
     my $format = $filename =~ /\.(raw|qcow2|vmdk)$/i ? lc($1) : 'raw';
-    return ($content, $filename, undef, undef, undef, undef, $format);
+    # images volnames include vmid: "9001/disk-0.raw" → vmid=9001, name=disk-0.raw
+    my $vmid;
+    if ($content eq 'images') {
+        ($vmid, my $name) = $filename =~ m|^(\d+)/(.+)$|;
+        $filename = $name if $name;
+    }
+    return ($content, $filename, $vmid, undef, undef, undef, $format);
 }
 
 sub _parse_volname {
     my ($volname) = @_;
     my $content = 'iso';
     my $filename = $volname;
-    if ($volname =~ m|^([^/]+)/(.+)$|) {
+    if ($volname =~ m|^(\d+)/(.+)$|) {
+        # Numeric first component is images content: "9001/disk-0.raw"
+        $content  = 'images';
+        $filename = "$1/$2";  # preserve vmid in filename for S3 key
+    } elsif ($volname =~ m|^([^/]+)/(.+)$|) {
         $content  = $1;
         $filename = $2;
     }
@@ -469,6 +479,7 @@ sub _content_to_prefix {
         snippets => 'snippets/',
         backup   => 'dump/',
         import   => 'import/',
+        images   => 'images/',
     );
     return $map{$content} // "${content}/";
 }

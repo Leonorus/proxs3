@@ -14,6 +14,7 @@ func TestContentToPrefix(t *testing.T) {
 		{"snippets", "snippets/"},
 		{"backup", "dump/"},
 		{"import", "import/"},
+		{"images", "images/"},
 		{"unknown", "unknown/"},
 		{"", "/"},
 	}
@@ -66,6 +67,7 @@ func TestPrefixDirs(t *testing.T) {
 		"snippets":       "snippets/",
 		"dump":           "dump/",
 		"import":         "import/",
+		"images":         "images/",
 	}
 	for key, val := range expected {
 		got, ok := prefixDirs[key]
