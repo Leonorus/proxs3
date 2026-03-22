@@ -257,8 +257,12 @@ func (fc *FileCache) EvictByAge(storageID string, maxAge time.Duration) int {
 		}
 		if info.ModTime().Before(cutoff) {
 			fc.mu.Lock()
-			clearImmutable(path)
-			if err := os.Remove(path); err == nil {
+			err := os.Remove(path)
+			if err != nil && !os.IsNotExist(err) {
+				clearImmutable(path)
+				err = os.Remove(path)
+			}
+			if err == nil || os.IsNotExist(err) {
 				removed++
 				// Clean up metadata
 				if rel, err := filepath.Rel(fc.baseDir, path); err == nil {
@@ -327,9 +331,12 @@ func (fc *FileCache) evictIfNeeded() {
 		if totalSize <= maxBytes {
 			break
 		}
-		clearImmutable(f.path)
 		if err := os.Remove(f.path); err != nil {
-			continue
+			// Retry after clearing immutable flag (PVE sets chattr +i on template base images)
+			clearImmutable(f.path)
+			if err := os.Remove(f.path); err != nil {
+				continue
+			}
 		}
 		os.Remove(f.path + ".meta") // legacy cleanup
 		// Clean up .meta/ directory entry
