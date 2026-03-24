@@ -34,7 +34,7 @@ Ext.define('PVE.storage.S3InputPanel', {
 		multiSelect: true,
 		fieldLabel: gettext('Content'),
 		allowBlank: false,
-		cts: ['iso', 'vztmpl', 'snippets', 'backup', 'import'],
+		cts: ['images', 'iso', 'vztmpl', 'snippets', 'backup', 'import'],
 	    },
 	];
 
