@@ -1,3 +1,11 @@
+proxs3 (0.6.0-1) unstable; urgency=medium
+
+  * Implement backup protected attribute via S3 object tags
+  * Add images content type to UI content type selector
+  * Complete PVE storage plugin API audit — all items resolved
+
+ -- Dave Kempe <dave@sol1.com.au>  Tue, 24 Mar 2026 16:43:00 +1100
+
 proxs3 (0.5.2-1) unstable; urgency=medium
 
   * Fix duplicate volume names on rapid consecutive allocations
