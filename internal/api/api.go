@@ -122,6 +122,8 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/v1/delete", s.handleDelete)
 	mux.HandleFunc("/v1/copy", s.handleCopy)
 	mux.HandleFunc("/v1/rename", s.handleRename)
+	mux.HandleFunc("/v1/get-attr", s.handleGetAttr)
+	mux.HandleFunc("/v1/set-attr", s.handleSetAttr)
 	mux.HandleFunc("/v1/path", s.handlePath)
 	mux.HandleFunc("/v1/config", s.handleConfig)
 
@@ -506,6 +508,64 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
 		os.Rename(src, dst)
 	}
 	s.cache.Invalidate(storageID, srcKey)
+
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleGetAttr(w http.ResponseWriter, r *http.Request) {
+	storageID := r.URL.Query().Get("storage")
+	key := r.URL.Query().Get("key")
+
+	client, ok := s.getClient(storageID)
+	if !ok {
+		http.Error(w, "unknown storage", http.StatusNotFound)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	tags, err := client.GetObjectTagging(ctx, key)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, tags)
+}
+
+func (s *Server) handleSetAttr(w http.ResponseWriter, r *http.Request) {
+	storageID := r.URL.Query().Get("storage")
+	key := r.URL.Query().Get("key")
+	attr := r.URL.Query().Get("attr")
+	value := r.URL.Query().Get("value")
+
+	client, ok := s.getClient(storageID)
+	if !ok {
+		http.Error(w, "unknown storage", http.StatusNotFound)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	// Get existing tags, update the one we want, write back
+	tags, err := client.GetObjectTagging(ctx, key)
+	if err != nil {
+		// No existing tags — start fresh
+		tags = make(map[string]string)
+	}
+
+	if value == "" {
+		delete(tags, attr)
+	} else {
+		tags[attr] = value
+	}
+
+	if err := client.PutObjectTagging(ctx, key, tags); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	writeJSON(w, map[string]string{"status": "ok"})
 }

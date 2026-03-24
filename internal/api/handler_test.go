@@ -134,6 +134,14 @@ func (m *mockS3Client) CopyObject(ctx context.Context, srcKey, dstKey string) er
 	return nil
 }
 
+func (m *mockS3Client) GetObjectTagging(ctx context.Context, key string) (map[string]string, error) {
+	return map[string]string{}, nil
+}
+
+func (m *mockS3Client) PutObjectTagging(ctx context.Context, key string, tags map[string]string) error {
+	return nil
+}
+
 // newTestServer creates a Server with a mock client for testing.
 func newTestServer(t *testing.T, mock *mockS3Client) *Server {
 	t.Helper()

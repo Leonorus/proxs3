@@ -649,6 +649,47 @@ sub volume_resize {
     die "volume resize is not supported on S3 storage\n";
 }
 
+sub get_volume_attribute {
+    my ($class, $scfg, $storeid, $volname, $attribute) = @_;
+
+    if ($attribute eq 'protected') {
+        my ($content, $filename) = _parse_volname($volname);
+        my $prefix = _content_to_prefix($content);
+        my $key = "${prefix}${filename}";
+
+        my $tags = eval {
+            _daemon_request('/v1/get-attr', { storage => $storeid, key => $key });
+        };
+        return 0 if $@ || !$tags;
+        return $tags->{protected} ? 1 : 0;
+    }
+
+    return;
+}
+
+sub update_volume_attribute {
+    my ($class, $scfg, $storeid, $volname, $attribute, $value) = @_;
+
+    if ($attribute eq 'protected') {
+        my ($content, $filename) = _parse_volname($volname);
+        my $prefix = _content_to_prefix($content);
+        my $key = "${prefix}${filename}";
+
+        eval {
+            _daemon_request('/v1/set-attr', {
+                storage => $storeid,
+                key     => $key,
+                attr    => 'protected',
+                value   => $value ? '1' : '',
+            });
+        };
+        die "failed to set protected attribute: $@\n" if $@;
+        return;
+    }
+
+    die "attribute '$attribute' is not supported on S3 storage\n";
+}
+
 sub prune_backups {
     my ($class, $scfg, $storeid, $keep, $vmid, $type, $dryrun, $logfunc) = @_;
 
@@ -673,12 +714,15 @@ sub prune_backups {
         next if defined($vmid) && $archive_info->{vmid} != $vmid;
         next if defined($type) && $archive_info->{type} ne $type;
 
+        # Check if backup is protected via S3 object tags
+        my $protected = eval { $class->get_volume_attribute($scfg, $storeid, $volname, 'protected') } // 0;
+
         push @backups, {
             volid  => $volid,
             ctime  => $archive_info->{ctime},
             vmid   => $archive_info->{vmid},
             type   => $archive_info->{type},
-            mark   => 'keep',
+            mark   => $protected ? 'protected' : 'keep',
         };
     }
 

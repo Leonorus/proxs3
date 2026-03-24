@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/sol1/proxs3/internal/config"
 )
 
@@ -24,6 +25,8 @@ type S3Client interface {
 	PutObject(ctx context.Context, key string, body io.Reader, size int64) error
 	DeleteObject(ctx context.Context, key string) error
 	CopyObject(ctx context.Context, srcKey, dstKey string) error
+	GetObjectTagging(ctx context.Context, key string) (map[string]string, error)
+	PutObjectTagging(ctx context.Context, key string, tags map[string]string) error
 	HeadBucket(ctx context.Context) error
 }
 
@@ -192,6 +195,39 @@ func (c *Client) CopyObject(ctx context.Context, srcKey, dstKey string) error {
 	})
 	if err != nil {
 		return fmt.Errorf("copying object %s to %s: %w", srcKey, dstKey, err)
+	}
+	return nil
+}
+
+// GetObjectTagging returns the tags on an S3 object.
+func (c *Client) GetObjectTagging(ctx context.Context, key string) (map[string]string, error) {
+	out, err := c.s3.GetObjectTagging(ctx, &s3.GetObjectTaggingInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("getting tags for %s: %w", key, err)
+	}
+	tags := make(map[string]string)
+	for _, t := range out.TagSet {
+		tags[aws.ToString(t.Key)] = aws.ToString(t.Value)
+	}
+	return tags, nil
+}
+
+// PutObjectTagging sets tags on an S3 object (replaces all existing tags).
+func (c *Client) PutObjectTagging(ctx context.Context, key string, tags map[string]string) error {
+	var tagSet []types.Tag
+	for k, v := range tags {
+		tagSet = append(tagSet, types.Tag{Key: aws.String(k), Value: aws.String(v)})
+	}
+	_, err := c.s3.PutObjectTagging(ctx, &s3.PutObjectTaggingInput{
+		Bucket:  aws.String(c.bucket),
+		Key:     aws.String(key),
+		Tagging: &types.Tagging{TagSet: tagSet},
+	})
+	if err != nil {
+		return fmt.Errorf("setting tags for %s: %w", key, err)
 	}
 	return nil
 }
