@@ -4,7 +4,7 @@ BINARY := proxs3d
 VERSION := 0.1.0
 
 build:
-	go build -o $(BINARY) ./cmd/proxs3d
+	go build -ldflags="-X main.version=$(VERSION)" -o $(BINARY) ./cmd/proxs3d
 
 test:
 	go test ./...

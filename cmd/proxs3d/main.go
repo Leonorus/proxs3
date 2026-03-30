@@ -12,11 +12,21 @@ import (
 	"github.com/sol1/proxs3/internal/config"
 )
 
+// version is set at build time via -ldflags "-X main.version=..."
+var version = "dev"
+
 const pidFile = "/run/proxs3d.pid"
 
 func main() {
 	configPath := flag.String("config", "/etc/proxs3/proxs3d.json", "path to config file")
+	showVersion := flag.Bool("version", false, "print version and exit")
+	flag.BoolVar(showVersion, "v", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("proxs3d " + version)
+		return
+	}
 
 	cfg, err := config.LoadDaemonConfig(*configPath)
 	if err != nil {

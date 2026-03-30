@@ -65,8 +65,8 @@ This gets you from zero to a working S3-backed ISO/template store in under 5 min
 On **each Proxmox node** in your cluster:
 
 ```bash
-# Download the latest release
-wget https://github.com/sol1/proxs3/releases/latest/download/proxs3_amd64.deb
+# Download the latest release (-O overwrites any previous download)
+wget -O proxs3_amd64.deb https://github.com/sol1/proxs3/releases/latest/download/proxs3_amd64.deb
 
 # Install
 dpkg -i proxs3_amd64.deb
