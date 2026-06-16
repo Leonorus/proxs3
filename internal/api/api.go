@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -356,6 +357,15 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		info, err := client.HeadObject(ctx, key)
 		cancel()
+		if errors.Is(err, s3client.ErrNotFound) {
+			// Object deleted on S3 — purge stale cache and fail closed.
+			// Use Remove (not Invalidate) so the immutable flag PVE sets on
+			// ISOs/templates is cleared and the file is actually removed.
+			log.Printf("download: %s/%s deleted on S3, removing stale cache", storageID, key)
+			s.cache.Remove(storageID, key)
+			http.Error(w, "object not found", http.StatusNotFound)
+			return
+		}
 		if err != nil {
 			// S3 unreachable — serve stale cache rather than failing
 			log.Printf("download: S3 unreachable for %s/%s, serving cached copy", storageID, key)

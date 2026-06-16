@@ -606,6 +606,34 @@ func TestHandleDownload_S3Unreachable_ServeStaleCache(t *testing.T) {
 	}
 }
 
+func TestHandleDownload_ObjectDeletedOnS3_RemovesCache(t *testing.T) {
+	mock := newMockClient("s3test")
+	// HeadObject reports the object is gone (404), distinct from a transport error.
+	mock.headErr = s3client.ErrNotFound
+	s := newTestServer(t, mock)
+
+	// Pre-populate cache to simulate a previously downloaded, now-deleted object.
+	key := "template/iso/user-data-118.iso"
+	meta := cache.FileMeta{ETag: "\"v1\"", Size: 5}
+	s.cache.Store("s3test", key, strings.NewReader("stale"), meta)
+	if s.cache.Path("s3test", key) == "" {
+		t.Fatal("setup: expected cached file to exist")
+	}
+
+	req := httptest.NewRequest("GET", "/v1/download?storage=s3test&key="+key, nil)
+	w := httptest.NewRecorder()
+	s.handleDownload(w, req)
+
+	// Must fail closed, not serve the stale identity payload.
+	if w.Code != 404 {
+		t.Fatalf("expected 404 when object deleted on S3, got %d: %s", w.Code, w.Body.String())
+	}
+	// Stale cache must be purged so it cannot be served on a later request.
+	if p := s.cache.Path("s3test", key); p != "" {
+		t.Errorf("expected stale cache removed, but Path returned %q", p)
+	}
+}
+
 func TestHandleDownload_S3Unreachable_NoCache(t *testing.T) {
 	mock := newMockClient("s3test")
 	mock.getErr = fmt.Errorf("connection refused")

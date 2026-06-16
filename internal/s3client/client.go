@@ -2,6 +2,7 @@ package s3client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,8 +14,41 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/sol1/proxs3/internal/config"
 )
+
+// ErrNotFound is returned (wrapped) when an object does not exist on S3, so
+// callers can distinguish a deleted/missing object from a transport failure
+// via errors.Is(err, s3client.ErrNotFound).
+var ErrNotFound = errors.New("s3client: object not found")
+
+// isNotFound reports whether err represents an S3 "object does not exist"
+// response (HTTP 404). HeadObject returns types.NotFound; S3-compatible
+// backends (e.g. MinIO) may surface a generic APIError or a 404 status.
+func isNotFound(err error) bool {
+	var nf *types.NotFound
+	if errors.As(err, &nf) {
+		return true
+	}
+	var nsk *types.NoSuchKey
+	if errors.As(err, &nsk) {
+		return true
+	}
+	var re *smithyhttp.ResponseError
+	if errors.As(err, &re) && re.HTTPStatusCode() == http.StatusNotFound {
+		return true
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "NotFound", "NoSuchKey":
+			return true
+		}
+	}
+	return false
+}
 
 // S3Client is the interface used by the API server for S3 operations.
 type S3Client interface {
@@ -136,6 +170,9 @@ func (c *Client) HeadObject(ctx context.Context, key string) (*ObjectInfo, error
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		if isNotFound(err) {
+			return nil, fmt.Errorf("heading object %s: %w", key, ErrNotFound)
+		}
 		return nil, fmt.Errorf("heading object %s: %w", key, err)
 	}
 	return &ObjectInfo{
