@@ -18,11 +18,28 @@ my $DEFAULT_CACHE_DIR = '/var/cache/proxs3';
 # Learned from daemon at activation time — never queried in check_config
 my $_cache_dir;
 
-# PVE storage plugin API version (must match or be within APIAGE of PVE::Storage::APIVER)
-use constant APIVERSION => 13;
+# PVE storage plugin API version range this plugin has been validated against.
+# PVE loads a custom plugin only if api() is within [APIVER-APIAGE, APIVER] of
+# the running PVE::Storage, and warns ("older storage API") unless it equals
+# APIVER. We therefore report the *running* version when it falls inside our
+# tested window, so the plugin tracks PVE forward and stays warning-free across
+# point releases without code changes.
+#
+#   v11: sensitive-properties / feature flags (used)
+#   v12: qemu_blockdev_options, snapshot helpers (optional — N/A, no live disks)
+#   v13: activate_volume/map_volume gained $hints; on_update_hook_full (we accept
+#        $hints in activate_volume; on_update_hook still used)
+#   v14: get_identity() (optional, base dies — N/A for an object store)
+use constant APIVERSION_MIN => 11;
+use constant APIVERSION_MAX => 14;
 
 sub api {
-    return APIVERSION;
+    my $apiver = eval { PVE::Storage::APIVER() };
+    return APIVERSION_MAX if !defined $apiver;
+    return $apiver if $apiver >= APIVERSION_MIN && $apiver <= APIVERSION_MAX;
+    # Outside our validated range: report our max and let PVE::Storage decide
+    # whether that is still acceptable (it dies if we are below APIVER-APIAGE).
+    return APIVERSION_MAX;
 }
 
 # Register as storage type 's3'

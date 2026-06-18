@@ -33,6 +33,15 @@ proxs3 (0.7.0-1) unstable; urgency=medium
     the local cache for one storage and uploads anything missing in S3
     or where the local copy is newer than the remote object. Streams
     progress to stdout; talks to the running daemon over the Unix socket.
+  * Report the running PVE storage API version from api() instead of a
+    hardcoded 13. PVE 9.2 is APIVER 14, so the old value triggered an
+    "implementing an older storage API" warning on every plugin load and
+    would have hard-failed once APIVER-APIAGE rose above 13. api() now
+    returns the live APIVER when it falls within the validated 11..14 range
+    (clamping to 14 otherwise), so the plugin tracks PVE forward without
+    code changes. No new methods required: APIVER 14 adds only the optional
+    get_identity() (N/A for an object store) and 13's activate_volume $hints
+    arg is already accepted.
 
  -- Dave Kempe <dave@sol1.com.au>  Fri, 08 May 2026 11:00:00 +1000
 
