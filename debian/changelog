@@ -1,5 +1,11 @@
 proxs3 (0.7.0-1) unstable; urgency=medium
 
+  * Fix deleted-on-S3 objects being served from cache indefinitely
+    (issue #12, thanks Leonorus): HeadObject now distinguishes a 404 from a
+    transport error (ErrNotFound), so /v1/download purges the cached copy and
+    fails closed when the object is gone instead of treating it as "S3
+    unreachable" and serving stale bytes. Matters for mutable, identity-
+    bearing artifacts such as cloud-init user-data ISOs.
   * Fix data loss in cache.Link when source path matches the canonical cache
     path (regression hit on /v1/upload of files already living in cache):
     the copy fallback would os.Create the destination before reading from
