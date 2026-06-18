@@ -49,7 +49,7 @@ proxs3 (0.7.0-1) unstable; urgency=medium
     get_identity() (N/A for an object store) and 13's activate_volume $hints
     arg is already accepted.
 
- -- Dave Kempe <dave@sol1.com.au>  Fri, 08 May 2026 11:00:00 +1000
+ -- Dave Kempe <dave@sol1.com.au>  Thu, 18 Jun 2026 21:19:42 +1000
 
 proxs3 (0.6.5-1) unstable; urgency=medium
 
