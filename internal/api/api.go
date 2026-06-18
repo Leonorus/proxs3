@@ -127,6 +127,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/v1/set-attr", s.handleSetAttr)
 	mux.HandleFunc("/v1/path", s.handlePath)
 	mux.HandleFunc("/v1/config", s.handleConfig)
+	mux.HandleFunc("/v1/resync", s.handleResync)
 
 	s.server = &http.Server{Handler: mux}
 
@@ -351,13 +352,14 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if we have a cached entry
+	// HEAD up front: needed for cache-staleness check and to know the size
+	// for progress logging during a long download.
+	headCtx, headCancel := context.WithTimeout(r.Context(), 60*time.Second)
+	head, headErr := client.HeadObject(headCtx, key)
+	headCancel()
+
 	if cached := s.cache.Path(storageID, key); cached != "" {
-		// Validate against S3 metadata (HeadObject is cheap)
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		info, err := client.HeadObject(ctx, key)
-		cancel()
-		if errors.Is(err, s3client.ErrNotFound) {
+		if errors.Is(headErr, s3client.ErrNotFound) {
 			// Object deleted on S3 — purge stale cache and fail closed.
 			// Use Remove (not Invalidate) so the immutable flag PVE sets on
 			// ISOs/templates is cleared and the file is actually removed.
@@ -366,50 +368,94 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "object not found", http.StatusNotFound)
 			return
 		}
-		if err != nil {
+		if headErr != nil {
 			// S3 unreachable — serve stale cache rather than failing
 			log.Printf("download: S3 unreachable for %s/%s, serving cached copy", storageID, key)
 			writeJSON(w, map[string]string{"path": cached})
 			return
 		}
-		if !s.cache.IsStale(storageID, key, info.ETag, info.LastModified) {
+		if !s.cache.IsStale(storageID, key, head.ETag, head.LastModified) {
 			log.Printf("download: cache hit for %s from %s", key, storageID)
 			writeJSON(w, map[string]string{"path": cached})
 			return
 		}
-		// Stale — invalidate and re-download
 		log.Printf("download: cached copy of %s from %s is stale, re-downloading", key, storageID)
 		s.cache.Invalidate(storageID, key)
 	}
 
-	// Download from S3 (no tight timeout here — large files take time)
-	log.Printf("download: downloading %s from s3://%s", key, storageID)
-	start := time.Now()
-	result, err := client.GetObject(r.Context(), key)
+	if errors.Is(headErr, s3client.ErrNotFound) {
+		// Not cached and gone from S3 — nothing to serve, fail closed.
+		log.Printf("download: %s/%s not found on S3", storageID, key)
+		http.Error(w, "object not found", http.StatusNotFound)
+		return
+	}
+	if headErr != nil {
+		log.Printf("download: HEAD failed for %s/%s: %v", storageID, key, headErr)
+		http.Error(w, headErr.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Download to a temp path under .downloads/ — this dir is a sibling of
+	// the storage cache trees and is NOT watched by the file watcher, so we
+	// won't accidentally trigger an upload of the partial file. Atomic rename
+	// into the final cache path once the transfer completes.
+	tmpPath := filepath.Join(s.cfg.CacheDir, ".downloads", storageID, key)
+	if err := os.MkdirAll(filepath.Dir(tmpPath), 0755); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	f, err := os.Create(tmpPath)
 	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	rmTmp := func() {
+		f.Close()
+		os.Remove(tmpPath)
+	}
+
+	log.Printf("download: downloading %s from s3://%s (%.1f MB)",
+		key, storageID, float64(head.Size)/(1024*1024))
+	start := time.Now()
+
+	pw := newProgressWriterAt(f, head.Size, fmt.Sprintf("download %s/%s", storageID, key))
+
+	n, err := client.DownloadToFile(r.Context(), key, pw)
+	if err != nil {
+		rmTmp()
 		log.Printf("download: failed to download %s from %s: %v", key, storageID, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer result.Body.Close()
-
-	// Store in cache with metadata
-	meta := cache.FileMeta{
-		ETag:         result.ETag,
-		LastModified: result.LastModified,
-		Size:         result.Size,
-	}
-	localPath, err := s.cache.Store(storageID, key, result.Body, meta)
-	if err != nil {
-		log.Printf("download: failed to cache %s from %s: %v", key, storageID, err)
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	log.Printf("download: cached %s from s3://%s (%.1f MB, %s)",
-		key, storageID, float64(meta.Size)/(1024*1024), time.Since(start).Round(time.Millisecond))
+	finalPath := s.cache.ExpectedPath(storageID, key)
+	if err := os.MkdirAll(filepath.Dir(finalPath), 0755); err != nil {
+		os.Remove(tmpPath)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		os.Remove(tmpPath)
+		log.Printf("download: rename %s -> %s failed: %v", tmpPath, finalPath, err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	writeJSON(w, map[string]string{"path": localPath})
+	s.cache.StoreMeta(storageID, key, cache.FileMeta{
+		ETag:         head.ETag,
+		LastModified: head.LastModified,
+		Size:         n,
+	})
+
+	log.Printf("download: cached %s from s3://%s (%.1f MB, %s)",
+		key, storageID, float64(n)/(1024*1024), time.Since(start).Round(time.Millisecond))
+
+	writeJSON(w, map[string]string{"path": finalPath})
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {

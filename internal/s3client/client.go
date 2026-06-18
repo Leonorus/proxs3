@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -56,6 +57,7 @@ type S3Client interface {
 	ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, error)
 	HeadObject(ctx context.Context, key string) (*ObjectInfo, error)
 	GetObject(ctx context.Context, key string) (*GetObjectResult, error)
+	DownloadToFile(ctx context.Context, key string, w io.WriterAt) (int64, error)
 	PutObject(ctx context.Context, key string, body io.Reader, size int64) error
 	DeleteObject(ctx context.Context, key string) error
 	CopyObject(ctx context.Context, srcKey, dstKey string) error
@@ -80,7 +82,19 @@ func New(cfg config.StorageConfig, proxy config.ProxyConfig) (*Client, error) {
 	}
 	endpoint := fmt.Sprintf("%s://%s", scheme, cfg.Endpoint)
 
-	transport := &http.Transport{}
+	// Explicit setup/handshake timeouts so we fail fast on connection
+	// problems, but no body deadline — large object transfers must be
+	// allowed to take as long as they need.
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+		ExpectContinueTimeout: 5 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	}
 	if proxy.HTTPSProxy != "" || proxy.HTTPProxy != "" {
 		transport.Proxy = func(req *http.Request) (*url.URL, error) {
 			if req.URL.Scheme == "https" && proxy.HTTPSProxy != "" {
@@ -198,6 +212,25 @@ func (c *Client) GetObject(ctx context.Context, key string) (*GetObjectResult, e
 		ETag:         aws.ToString(out.ETag),
 		LastModified: aws.ToTime(out.LastModified),
 	}, nil
+}
+
+// DownloadToFile streams an object into w using the AWS SDK's Downloader,
+// which issues parallel Range GETs (4 × 64 MB by default) and retries each
+// chunk independently. This is the right primitive for multi-GB objects
+// where a single streaming GET is fragile against mid-transfer failures.
+func (c *Client) DownloadToFile(ctx context.Context, key string, w io.WriterAt) (int64, error) {
+	downloader := manager.NewDownloader(c.s3, func(d *manager.Downloader) {
+		d.PartSize = c.partSizeMB * 1024 * 1024
+		d.Concurrency = 4
+	})
+	n, err := downloader.Download(ctx, w, &s3.GetObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("downloading object %s: %w", key, err)
+	}
+	return n, nil
 }
 
 // PutObject uploads an object from a reader.

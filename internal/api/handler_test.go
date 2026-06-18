@@ -103,6 +103,18 @@ func (m *mockS3Client) GetObject(ctx context.Context, key string) (*s3client.Get
 	}, nil
 }
 
+func (m *mockS3Client) DownloadToFile(ctx context.Context, key string, w io.WriterAt) (int64, error) {
+	if m.getErr != nil {
+		return 0, m.getErr
+	}
+	obj, ok := m.objects[key]
+	if !ok {
+		return 0, fmt.Errorf("not found: %s", key)
+	}
+	n, err := w.WriteAt([]byte(obj.data), 0)
+	return int64(n), err
+}
+
 func (m *mockS3Client) PutObject(ctx context.Context, key string, body io.Reader, size int64) error {
 	if m.putErr != nil {
 		return m.putErr
@@ -858,6 +870,162 @@ func TestHandleConfig(t *testing.T) {
 
 	if resp["cache_dir"] != s.cfg.CacheDir {
 		t.Errorf("expected cache_dir %q, got %q", s.cfg.CacheDir, resp["cache_dir"])
+	}
+}
+
+// --- Resync handler tests ---
+
+// writeCacheFile writes content into the canonical cache path for storage/key
+// and sets its mtime, so resync's mtime comparison is deterministic.
+func writeCacheFile(t *testing.T, s *Server, storageID, key, content string, mtime time.Time) string {
+	t.Helper()
+	p := filepath.Join(s.cfg.CacheDir, storageID, key)
+	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.Chtimes(p, mtime, mtime); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	return p
+}
+
+func TestHandleResync_UploadsMissing(t *testing.T) {
+	mock := newMockClient("s3test")
+	s := newTestServer(t, mock)
+	writeCacheFile(t, s, "s3test", "images/9113/disk-0", "hello world", time.Now())
+
+	req := httptest.NewRequest("GET", "/v1/resync?storage=s3test", nil)
+	w := httptest.NewRecorder()
+	s.handleResync(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if _, ok := mock.objects["images/9113/disk-0"]; !ok {
+		t.Fatalf("expected object uploaded; bucket has %v", mock.objects)
+	}
+	if !strings.Contains(w.Body.String(), "uploaded=1") {
+		t.Errorf("expected summary uploaded=1, got: %s", w.Body.String())
+	}
+}
+
+func TestHandleResync_SkipsInSync(t *testing.T) {
+	mock := newMockClient("s3test")
+	mock.objects["template/iso/a.iso"] = mockObject{
+		data: "hello", size: 5, etag: "\"x\"", lastModified: time.Now(),
+	}
+	s := newTestServer(t, mock)
+	writeCacheFile(t, s, "s3test", "template/iso/a.iso", "hello", time.Now())
+
+	req := httptest.NewRequest("GET", "/v1/resync?storage=s3test", nil)
+	w := httptest.NewRecorder()
+	s.handleResync(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "uploaded=0") {
+		t.Errorf("expected uploaded=0, got: %s", body)
+	}
+	// Metadata should be backfilled so the watcher won't re-upload
+	if s.cache.GetMeta("s3test", "template/iso/a.iso") == nil {
+		t.Error("expected meta to be backfilled for in-sync file")
+	}
+}
+
+func TestHandleResync_SizeMismatchLocalNewer_Uploads(t *testing.T) {
+	mock := newMockClient("s3test")
+	// S3 has an older, smaller copy
+	mock.objects["snippets/cloud.yaml"] = mockObject{
+		data: "old", size: 3, etag: "\"old\"", lastModified: time.Now().Add(-1 * time.Hour),
+	}
+	s := newTestServer(t, mock)
+	// Local has a newer, larger copy
+	writeCacheFile(t, s, "s3test", "snippets/cloud.yaml", "much longer content", time.Now())
+
+	req := httptest.NewRequest("GET", "/v1/resync?storage=s3test", nil)
+	w := httptest.NewRecorder()
+	s.handleResync(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "uploaded=1") {
+		t.Errorf("expected uploaded=1, got: %s", body)
+	}
+	if !strings.Contains(body, "WARNING") {
+		t.Errorf("expected warning emitted for date conflict, got: %s", body)
+	}
+	if mock.objects["snippets/cloud.yaml"].size != int64(len("much longer content")) {
+		t.Errorf("expected S3 to have new content size, got: %+v", mock.objects["snippets/cloud.yaml"])
+	}
+}
+
+func TestHandleResync_SizeMismatchS3Newer_SkipsByDefault(t *testing.T) {
+	mock := newMockClient("s3test")
+	mock.objects["snippets/cloud.yaml"] = mockObject{
+		data: "newer-on-s3", size: 11, etag: "\"new\"", lastModified: time.Now(),
+	}
+	s := newTestServer(t, mock)
+	// Local file with mtime in the past
+	writeCacheFile(t, s, "s3test", "snippets/cloud.yaml", "old", time.Now().Add(-1*time.Hour))
+
+	req := httptest.NewRequest("GET", "/v1/resync?storage=s3test", nil)
+	w := httptest.NewRecorder()
+	s.handleResync(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "conflicts=1") {
+		t.Errorf("expected conflicts=1, got: %s", body)
+	}
+	if mock.objects["snippets/cloud.yaml"].size != 11 {
+		t.Errorf("S3 object should be untouched, got: %+v", mock.objects["snippets/cloud.yaml"])
+	}
+}
+
+func TestHandleResync_SizeMismatchS3Newer_ForceOverwrites(t *testing.T) {
+	mock := newMockClient("s3test")
+	mock.objects["snippets/cloud.yaml"] = mockObject{
+		data: "newer-on-s3", size: 11, etag: "\"new\"", lastModified: time.Now(),
+	}
+	s := newTestServer(t, mock)
+	writeCacheFile(t, s, "s3test", "snippets/cloud.yaml", "old", time.Now().Add(-1*time.Hour))
+
+	req := httptest.NewRequest("GET", "/v1/resync?storage=s3test&force=1", nil)
+	w := httptest.NewRecorder()
+	s.handleResync(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "uploaded=1") {
+		t.Errorf("expected uploaded=1 with force, got: %s", body)
+	}
+	if mock.objects["snippets/cloud.yaml"].size != 3 {
+		t.Errorf("expected S3 to be overwritten with local size 3, got: %+v", mock.objects["snippets/cloud.yaml"])
+	}
+}
+
+func TestHandleResync_MissingStorageParam(t *testing.T) {
+	mock := newMockClient("s3test")
+	s := newTestServer(t, mock)
+
+	req := httptest.NewRequest("GET", "/v1/resync", nil)
+	w := httptest.NewRecorder()
+	s.handleResync(w, req)
+
+	if w.Code != 400 {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleResync_UnknownStorage(t *testing.T) {
+	mock := newMockClient("s3test")
+	s := newTestServer(t, mock)
+
+	req := httptest.NewRequest("GET", "/v1/resync?storage=other", nil)
+	w := httptest.NewRecorder()
+	s.handleResync(w, req)
+
+	if w.Code != 404 {
+		t.Errorf("expected 404, got %d", w.Code)
 	}
 }
 

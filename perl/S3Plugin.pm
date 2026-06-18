@@ -390,10 +390,17 @@ sub path {
     my ($safe_path) = $res->{path} =~ /\A([a-zA-Z0-9._\/-]+)\z/
         or die "Invalid path from daemon: $res->{path}\n";
 
-    # If file is not in cache, download it from S3 (GitHub issue #4).
-    # PVE does not call activate_volume() for all content types (e.g. import,
-    # snippets), so path() must ensure the file exists on disk.
-    if (! -e $safe_path) {
+    # If the file is not in the cache, download from S3 — but ONLY for
+    # content types where PVE does not call activate_volume (snippets,
+    # import). For every other type (backup, iso, vztmpl, images),
+    # activate_volume runs inside a worker task and handles the download
+    # there. Doing it here would block the API thread; pveproxy times out
+    # at ~30s, the user sees "connection error timeout" in the UI, and
+    # combined with a multi-GB file vs cache_max_mb you can get a download
+    # → evict → retry loop. Issue #4 wanted path() to download — that's
+    # still right for snippets/import (no activate_volume hook) but wrong
+    # for the others.
+    if (! -e $safe_path && ($content eq 'snippets' || $content eq 'import')) {
         eval {
             _daemon_request('/v1/download', { storage => $storeid, key => $key });
         };

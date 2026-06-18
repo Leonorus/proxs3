@@ -179,19 +179,32 @@ func (fc *FileCache) Link(storageID, key, srcPath string, meta FileMeta) {
 		return
 	}
 
-	// Try hard link first, fall back to copy
-	if err := os.Link(srcPath, p); err != nil {
-		src, err := os.Open(srcPath)
-		if err != nil {
-			return
+	// If srcPath is already the canonical cache path (same inode), there is
+	// nothing to link or copy — the file is already in place. Skipping is
+	// critical: the copy fallback below would os.Create(p) before reading
+	// src, which truncates the file we're trying to register.
+	sameInode := false
+	if sa, err := os.Stat(srcPath); err == nil {
+		if sb, err := os.Stat(p); err == nil && os.SameFile(sa, sb) {
+			sameInode = true
 		}
-		defer src.Close()
-		dst, err := os.Create(p)
-		if err != nil {
-			return
+	}
+
+	if !sameInode {
+		// Try hard link first, fall back to copy
+		if err := os.Link(srcPath, p); err != nil {
+			src, err := os.Open(srcPath)
+			if err != nil {
+				return
+			}
+			defer src.Close()
+			dst, err := os.Create(p)
+			if err != nil {
+				return
+			}
+			defer dst.Close()
+			io.Copy(dst, src)
 		}
-		defer dst.Close()
-		io.Copy(dst, src)
 	}
 
 	// Write metadata to .meta/ subdirectory
@@ -297,25 +310,40 @@ type cachedFile struct {
 	modTime int64
 }
 
+// evictMinAge is how recently a file must have been modified to be exempt
+// from size-based eviction. Without this protection, a single download
+// larger than the cache size would self-evict the moment it completed,
+// causing PVE's restore flow to loop indefinitely (download → evict →
+// retry).
+const evictMinAge = 30 * time.Minute
+
 // evictIfNeeded removes oldest files until cache is under the size limit.
+// Files modified within evictMinAge are protected — they're likely in
+// active use (just downloaded for a restore, just uploaded by PVE, etc.).
 func (fc *FileCache) evictIfNeeded() {
 	if fc.maxMB <= 0 {
 		return
 	}
 
+	maxBytes := fc.maxMB * 1024 * 1024
+	youngCutoff := time.Now().Add(-evictMinAge)
+
 	var files []cachedFile
-	var totalSize int64
+	var totalSize, protectedSize int64
 
 	filepath.Walk(fc.baseDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
-		// Skip the .meta directory entirely
 		if strings.Contains(path, string(os.PathSeparator)+".meta"+string(os.PathSeparator)) {
 			return nil
 		}
-		// Skip legacy .meta sidecar files
 		if filepath.Ext(path) == ".meta" {
+			return nil
+		}
+		totalSize += info.Size()
+		if info.ModTime().After(youngCutoff) {
+			protectedSize += info.Size()
 			return nil
 		}
 		files = append(files, cachedFile{
@@ -323,16 +351,13 @@ func (fc *FileCache) evictIfNeeded() {
 			size:    info.Size(),
 			modTime: info.ModTime().Unix(),
 		})
-		totalSize += info.Size()
 		return nil
 	})
 
-	maxBytes := fc.maxMB * 1024 * 1024
 	if totalSize <= maxBytes {
 		return
 	}
 
-	// Sort oldest first
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].modTime < files[j].modTime
 	})
@@ -345,18 +370,21 @@ func (fc *FileCache) evictIfNeeded() {
 			break
 		}
 		if err := os.Remove(f.path); err != nil {
-			// Retry after clearing immutable flag (PVE sets chattr +i on template base images)
 			clearImmutable(f.path)
 			if err := os.Remove(f.path); err != nil {
 				continue
 			}
 		}
-		os.Remove(f.path + ".meta") // legacy cleanup
-		// Clean up .meta/ directory entry
+		os.Remove(f.path + ".meta")
 		if rel, err := filepath.Rel(fc.baseDir, f.path); err == nil {
 			os.Remove(filepath.Join(fc.baseDir, ".meta", rel+".json"))
 		}
 		totalSize -= f.size
 		log.Printf("cache evict: %s (%d MB remaining)", f.path, totalSize/(1024*1024))
+	}
+
+	if totalSize > maxBytes {
+		log.Printf("cache: %d MB used exceeds limit %d MB; %d MB protected as recently-modified — consider raising cache_max_mb",
+			totalSize/(1024*1024), maxBytes/(1024*1024), protectedSize/(1024*1024))
 	}
 }

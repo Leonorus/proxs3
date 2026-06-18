@@ -1,3 +1,41 @@
+proxs3 (0.7.0-1) unstable; urgency=medium
+
+  * Fix data loss in cache.Link when source path matches the canonical cache
+    path (regression hit on /v1/upload of files already living in cache):
+    the copy fallback would os.Create the destination before reading from
+    the source, truncating the file to zero bytes; the watcher would then
+    upload the now-empty file to S3, clobbering the just-uploaded copy.
+  * Fix cache self-eviction loop: a single file larger than cache_max_mb
+    was deleted moments after being downloaded, which made PVE restores of
+    multi-GB backups loop forever (download -> evict -> retry). Files
+    modified within the last 30 minutes are now exempt from size-based
+    eviction; a warning is logged when the cache stays over budget.
+  * Fix PVE restore "connection error timeout" in the UI: path() no longer
+    triggers a synchronous download from the API thread for content types
+    where activate_volume is called (backup, iso, vztmpl, images). PVE's
+    worker task handles the fetch via activate_volume where there is no
+    pveproxy timeout. Snippets and import keep the prior behavior.
+  * Switch /v1/download to AWS SDK manager.Downloader (4 x 64MB chunks,
+    parallel Range GETs with per-chunk retry) — large-object downloads
+    now survive transient network failures instead of restarting from
+    zero. Symmetric with the existing manager.Uploader path.
+  * Add explicit S3 HTTP transport timeouts (DialContext 30s, TLS 15s,
+    ResponseHeader 60s) — fast-fail on connection problems while keeping
+    body transfers unbounded.
+  * Download via .downloads/<storage>/ tmp tree (sibling of the storage
+    cache, outside the watcher's view), then atomic rename into place.
+    Stops the watcher from ever seeing partial files.
+  * Log download progress every 30 seconds with throughput so long
+    transfers leave a useful trail in journalctl.
+  * Bump HEAD timeout in /v1/download from 10s to 60s to handle slow S3
+    regions without spurious "S3 unreachable" warnings.
+  * Add `proxs3d --resync STORAGE` (with optional --force-latest): walks
+    the local cache for one storage and uploads anything missing in S3
+    or where the local copy is newer than the remote object. Streams
+    progress to stdout; talks to the running daemon over the Unix socket.
+
+ -- Dave Kempe <dave@sol1.com.au>  Fri, 08 May 2026 11:00:00 +1000
+
 proxs3 (0.6.5-1) unstable; urgency=medium
 
   * Fix delete leaving stale local cache files that block re-upload (issue #11)

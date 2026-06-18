@@ -369,6 +369,47 @@ func TestLink(t *testing.T) {
 	}
 }
 
+// TestLink_SrcAlreadyAtCachePath guards against the data-loss bug where Link
+// was called with srcPath equal to the canonical cache path: os.Link returned
+// EEXIST, the copy fallback ran os.Create on the destination (truncating the
+// file we were about to read from), and io.Copy then wrote zero bytes.
+func TestLink_SrcAlreadyAtCachePath(t *testing.T) {
+	dir := t.TempDir()
+	fc, err := New(dir, 100)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	storageID := "s"
+	key := "images/9113/disk-0"
+	cachePath := fc.path(storageID, key)
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	original := bytes.Repeat([]byte("A"), 4096)
+	if err := os.WriteFile(cachePath, original, 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	meta := FileMeta{Size: int64(len(original)), LastModified: time.Now()}
+	fc.Link(storageID, key, cachePath, meta)
+
+	got, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatalf("read after Link: %v", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Errorf("Link clobbered the file: original %d bytes, got %d bytes", len(original), len(got))
+	}
+	m := fc.GetMeta(storageID, key)
+	if m == nil {
+		t.Fatal("expected metadata written")
+	}
+	if m.Size != int64(len(original)) {
+		t.Errorf("expected meta size %d, got %d", len(original), m.Size)
+	}
+}
+
 func TestEviction(t *testing.T) {
 	dir := t.TempDir()
 	// 1 MB max cache
@@ -399,6 +440,60 @@ func TestEviction(t *testing.T) {
 	// The newer file should still be there
 	if !fc.Has("s", "new.iso") {
 		t.Error("expected new file to still exist")
+	}
+}
+
+// TestEviction_DoesNotEvictRecentlyStored guards against the self-eviction
+// loop where a single file larger than maxMB was deleted moments after
+// being stored, which made PVE's restore flow loop forever (download →
+// evict → re-download).
+func TestEviction_DoesNotEvictRecentlyStored(t *testing.T) {
+	dir := t.TempDir()
+	fc, err := New(dir, 1) // 1 MB limit
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	// Single 5 MB file — well over the 1 MB cap on its own.
+	bigData := bytes.Repeat([]byte("x"), 5*1024*1024)
+	if _, err := fc.Store("s", "dump/big.vma.zst", bytes.NewReader(bigData), FileMeta{Size: int64(len(bigData))}); err != nil {
+		t.Fatalf("Store failed: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond) // let async evictIfNeeded run
+
+	if !fc.Has("s", "dump/big.vma.zst") {
+		t.Fatal("recently-stored file was evicted despite size protection — PVE would loop here")
+	}
+}
+
+// TestEviction_StillEvictsOldFiles confirms the protection only covers
+// recent files: an old, oversized file is still evicted to make room.
+func TestEviction_StillEvictsOldFiles(t *testing.T) {
+	dir := t.TempDir()
+	fc, err := New(dir, 1) // 1 MB limit
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	// Store an old big file and back-date it past the protection window.
+	oldData := bytes.Repeat([]byte("o"), 800*1024)
+	fc.Store("s", "dump/old.vma", bytes.NewReader(oldData), FileMeta{Size: int64(len(oldData))})
+	oldPath := fc.path("s", "dump/old.vma")
+	past := time.Now().Add(-2 * time.Hour)
+	os.Chtimes(oldPath, past, past)
+
+	// Store a new file — should push us over the cap and evict the old one.
+	newData := bytes.Repeat([]byte("n"), 800*1024)
+	fc.Store("s", "dump/new.vma", bytes.NewReader(newData), FileMeta{Size: int64(len(newData))})
+
+	time.Sleep(200 * time.Millisecond)
+
+	if fc.Has("s", "dump/old.vma") {
+		t.Error("expected old file to be evicted")
+	}
+	if !fc.Has("s", "dump/new.vma") {
+		t.Error("expected newly-stored file to be retained")
 	}
 }
 

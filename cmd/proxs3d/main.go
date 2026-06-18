@@ -1,9 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -21,10 +26,23 @@ func main() {
 	configPath := flag.String("config", "/etc/proxs3/proxs3d.json", "path to config file")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.BoolVar(showVersion, "v", false, "print version and exit")
+	resyncStorage := flag.String("resync", "", "scan local cache for STORAGE and upload any files missing or newer in S3, then exit")
+	forceLatest := flag.Bool("force-latest", false, "with --resync: also overwrite S3 objects that are newer than the local copy")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println("proxs3d " + version)
+		return
+	}
+
+	if *resyncStorage != "" {
+		cfg, err := config.LoadDaemonConfig(*configPath)
+		if err != nil {
+			log.Fatalf("Failed to load config: %v", err)
+		}
+		if err := runResync(cfg.SocketPath, *resyncStorage, *forceLatest); err != nil {
+			log.Fatalf("resync failed: %v", err)
+		}
 		return
 	}
 
@@ -79,4 +97,43 @@ func main() {
 	if err := srv.Start(); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
+}
+
+// runResync connects to the running daemon's Unix socket, calls /v1/resync,
+// and streams the response to stdout. Used by the --resync CLI flag.
+func runResync(socketPath, storage string, force bool) error {
+	httpc := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("unix", socketPath)
+			},
+		},
+		// No client-side timeout: a large bucket may take an hour or more.
+		// Cancellation comes from SIGINT propagating through the request context.
+	}
+
+	q := url.Values{}
+	q.Set("storage", storage)
+	if force {
+		q.Set("force", "1")
+	}
+
+	req, err := http.NewRequest("GET", "http://daemon/v1/resync?"+q.Encode(), nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := httpc.Do(req)
+	if err != nil {
+		return fmt.Errorf("contacting daemon at %s (is proxs3d running?): %w", socketPath, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("daemon returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	_, err = io.Copy(os.Stdout, resp.Body)
+	return err
 }

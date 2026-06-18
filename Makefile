@@ -1,7 +1,7 @@
 .PHONY: build clean deb install test
 
 BINARY := proxs3d
-VERSION := 0.1.0
+VERSION := 0.7.0
 
 build:
 	go build -ldflags="-X main.version=$(VERSION)" -o $(BINARY) ./cmd/proxs3d
