@@ -30,8 +30,11 @@ type Server struct {
 	usage    map[string]int64
 	healthMu sync.RWMutex
 	clientMu sync.RWMutex
-	listener net.Listener
-	server   *http.Server
+	// uploading tracks local paths with an upload in flight, so the watcher
+	// and handleDownload's pending-upload path don't upload the same file twice.
+	uploading sync.Map
+	listener  net.Listener
+	server    *http.Server
 }
 
 // New creates a new API server.
@@ -360,6 +363,19 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	if cached := s.cache.Path(storageID, key); cached != "" {
 		if errors.Is(headErr, s3client.ErrNotFound) {
+			// Cache metadata is written only after a confirmed S3 operation
+			// (download from S3, upload, watcher upload, resync). No meta means
+			// the file was created locally by PVE and is still waiting for the
+			// watcher's async upload — a HEAD 404 is expected then, and purging
+			// would destroy the file before it ever reaches S3.
+			if s.cache.GetMeta(storageID, key) == nil {
+				log.Printf("download: %s/%s not on S3 but present locally (pending upload), serving local copy", storageID, key)
+				if !fileInUse(cached) {
+					go s.uploadNewFile(cached)
+				}
+				writeJSON(w, map[string]string{"path": cached})
+				return
+			}
 			// Object deleted on S3 — purge stale cache and fail closed.
 			// Use Remove (not Invalidate) so the immutable flag PVE sets on
 			// ISOs/templates is cleared and the file is actually removed.

@@ -168,6 +168,13 @@ func (s *Server) uploadNewFile(localPath string) {
 		return
 	}
 
+	// Both the watcher and handleDownload's pending-upload path can trigger
+	// an upload for the same file; only one may run at a time.
+	if _, inFlight := s.uploading.LoadOrStore(localPath, struct{}{}); inFlight {
+		return
+	}
+	defer s.uploading.Delete(localPath)
+
 	// Parse: /var/cache/proxs3/<storageID>/<prefix>/<filename>
 	rel, err := filepath.Rel(s.cfg.CacheDir, localPath)
 	if err != nil {

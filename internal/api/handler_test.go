@@ -646,6 +646,74 @@ func TestHandleDownload_ObjectDeletedOnS3_RemovesCache(t *testing.T) {
 	}
 }
 
+func TestHandleDownload_LocalPendingUpload_ServedNotPurged(t *testing.T) {
+	mock := newMockClient("s3test")
+	// The object does not exist on S3 yet — the watcher hasn't uploaded it.
+	mock.headErr = s3client.ErrNotFound
+	s := newTestServer(t, mock)
+
+	// PVE writes files directly into the cache dir; no meta sidecar exists yet.
+	key := "template/iso/user-data-200.iso"
+	localPath := filepath.Join(s.cfg.CacheDir, "s3test", "template", "iso", "user-data-200.iso")
+	os.MkdirAll(filepath.Dir(localPath), 0755)
+	os.WriteFile(localPath, []byte("cloud-init payload"), 0644)
+
+	req := httptest.NewRequest("GET", "/v1/download?storage=s3test&key="+key, nil)
+	w := httptest.NewRecorder()
+	s.handleDownload(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200 for local file pending upload, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["path"] != localPath {
+		t.Errorf("expected local path %q, got %q", localPath, resp["path"])
+	}
+	if _, err := os.Stat(localPath); err != nil {
+		t.Errorf("expected local file to survive, stat failed: %v", err)
+	}
+
+	// handleDownload triggers the upload asynchronously; meta is written
+	// (under the cache lock) only after PutObject succeeds.
+	deadline := time.Now().Add(5 * time.Second)
+	for s.cache.GetMeta("s3test", key) == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for triggered upload to store metadata")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, ok := mock.objects[key]; !ok {
+		t.Error("expected triggered upload to put the object to S3")
+	}
+}
+
+func TestHandleDownload_ObjectDeletedOnS3_WatcherUploadedMeta_RemovesCache(t *testing.T) {
+	mock := newMockClient("s3test")
+	mock.headErr = s3client.ErrNotFound
+	s := newTestServer(t, mock)
+
+	// Simulate a locally created file the watcher already uploaded: content on
+	// disk plus the meta the watcher writes after PutObject (size, no ETag).
+	// With confirmed S3 provenance, a 404 means deleted on S3 → fail closed.
+	key := "template/iso/user-data-118.iso"
+	localPath := filepath.Join(s.cfg.CacheDir, "s3test", "template", "iso", "user-data-118.iso")
+	os.MkdirAll(filepath.Dir(localPath), 0755)
+	os.WriteFile(localPath, []byte("stale"), 0644)
+	s.cache.StoreMeta("s3test", key, cache.FileMeta{Size: 5, LastModified: time.Now()})
+
+	req := httptest.NewRequest("GET", "/v1/download?storage=s3test&key="+key, nil)
+	w := httptest.NewRecorder()
+	s.handleDownload(w, req)
+
+	if w.Code != 404 {
+		t.Fatalf("expected 404 when uploaded object was deleted on S3, got %d: %s", w.Code, w.Body.String())
+	}
+	if p := s.cache.Path("s3test", key); p != "" {
+		t.Errorf("expected cache purged, but Path returned %q", p)
+	}
+}
+
 func TestHandleDownload_S3Unreachable_NoCache(t *testing.T) {
 	mock := newMockClient("s3test")
 	mock.getErr = fmt.Errorf("connection refused")

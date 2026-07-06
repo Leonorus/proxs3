@@ -16,6 +16,14 @@ proxs3 (0.7.0-1) unstable; urgency=medium
     multi-GB backups loop forever (download -> evict -> retry). Files
     modified within the last 30 minutes are now exempt from size-based
     eviction; a warning is logged when the cache stays over budget.
+  * Fix /v1/download destroying locally created files still waiting for the
+    watcher's async upload: a HeadObject 404 was treated as "deleted on S3"
+    and purged the cached file even when it had never been uploaded yet
+    (e.g. cloud-init user-data ISOs written by PVE and attached immediately),
+    losing the file permanently. Cache metadata is only written after a
+    confirmed S3 operation, so a cache file without metadata is now served
+    locally and enqueued for upload instead of being purged; files with
+    confirmed S3 provenance still fail closed on 404.
   * Fix PVE restore "connection error timeout" in the UI: path() no longer
     triggers a synchronous download from the API thread for content types
     where activate_volume is called (backup, iso, vztmpl, images). PVE's
